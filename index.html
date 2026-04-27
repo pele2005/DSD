@@ -582,7 +582,7 @@ var CFG = {
   /* ---- Column indices in the DATA tab (0 = column A) ----
      ปรับค่าเหล่านี้ให้ตรงกับโครงสร้าง Excel ที่ export จาก SIS4
      (row แรกของ DATA tab ต้องเป็น header row)
-     test
+     ตัวอย่างโครงสร้างที่คาดไว้:
        A(0)=Date  B(1)=Rep  C(2)=Customer  D(3)=Product Item  E(4)=Invoice
        F(5)=Qty   G(6)=Amount  H(7)=F.O.C  I(8)=F.O.C2  J(9)=Borrow
   */
@@ -604,19 +604,20 @@ var CFG = {
    STATE
 ================================================================ */
 var S = {
-  users:   [],
-  perms:   {},
-  raw:     [],
-  view:    [],
+  users:   [],   // [{u:'1BA', p:'23061985'}, …]
+  perms:   {},   // {'1BA':['1BA'], 'ADMIN':['1BA','1BB',…], …}
+  raw:     [],   // all parsed rows from DATA tab
+  view:    [],   // filtered rows shown in table
   user:    null,
-  mode:    'day',
-  date:    new Date(),
+  mode:    'day',       // 'day' | 'month'
+  date:    new Date(),  // current navigation date
   loaded:  false
 };
 
 /* ================================================================
-   GOOGLE SHEETS
-   Sheet all 3 must be "Anyone with the link -> Viewer"
+   GOOGLE SHEETS – gviz/tq fetcher
+   หมายเหตุ: Sheet ทั้ง 3 ต้องตั้ง sharing เป็น
+   "Anyone with the link → Viewer" จึงจะทำงานได้
 ================================================================ */
 function fetchSheet(sheetId, tabName) {
   var url = 'https://docs.google.com/spreadsheets/d/' + sheetId
@@ -625,6 +626,7 @@ function fetchSheet(sheetId, tabName) {
   return fetch(url, {cache:'no-store'})
     .then(function(r){ return r.text(); })
     .then(function(txt){
+      // Strip JSONP wrapper: google.visualization.Query.setResponse({…});
       var m = txt.match(/google\.visualization\.Query\.setResponse\(([\s\S]*?)\);?\s*$/);
       if (!m) throw new Error('Sheet "' + tabName + '": invalid response');
       var obj = JSON.parse(m[1]);
@@ -636,11 +638,13 @@ function fetchSheet(sheetId, tabName) {
     });
 }
 
+/* Convert gviz table object → array of arrays */
 function parseTable(table) {
   if (!table || !table.rows) return [];
   return table.rows.map(function(row){
     return (row.c || []).map(function(cell){
       if (!cell || cell.v === null || cell.v === undefined) return '';
+      // Google date: "Date(2026,3,1)" → JS Date (month is 0-based)
       if (typeof cell.v === 'string' && cell.v.startsWith('Date(')) {
         var parts = cell.v.slice(5,-1).split(',').map(Number);
         return new Date(parts[0], parts[1], parts[2]);
@@ -650,184 +654,316 @@ function parseTable(table) {
   }).filter(function(r){ return r.some(function(v){ return v !== '' && v !== null; }); });
 }
 
+/* ================================================================
+   LOGIN
+================================================================ */
 function doLogin() {
-  var u = el('inpUser').value.trim().toUpperCase();
-  var p = el('inpPass').value.trim();
+  var u  = el('inpUser').value.trim().toUpperCase();
+  var p  = el('inpPass').value.trim();
   var eb = el('loginErr');
   var bt = el('btnLogin');
-  if (!u || !p) { showLoginErr('Please enter Username and Password'); return; }
+
+  if (!u || !p) { showLoginErr('กรุณากรอก Username และ Password'); return; }
+
   bt.disabled = true;
-  bt.textContent = 'Verifying...';
+  bt.textContent = 'กำลังตรวจสอบ …';
   eb.style.display = 'none';
-  var loadUsers = S.users.length > 0 ? Promise.resolve() :
-    fetchSheet(CFGUSERS_ID, CFG.USERS_TAB).then(function(rows){
-      S.users = rows.map(function(r){ return { u: String(r[0]||'').trim().toUpperCase(), p: String(r[1]||'').trim() }; });
+
+  var loadUsers = S.users.length > 0
+    ? Promise.resolve()
+    : fetchSheet(CFG.USERS_ID, CFG.USERS_TAB).then(function(rows){
+        S.users = rows.map(function(r){
+          return { u: String(r[0]||'').trim().toUpperCase(),
+                   p: String(r[1]||'').trim() };
+        });
+      });
+
+  loadUsers
+    .then(function(){
+      var found = S.users.find(function(x){ return x.u === u && x.p === p; });
+      if (!found) {
+        showLoginErr('Username หรือ Password ไม่ถูกต้อง');
+        bt.disabled = false; bt.textContent = 'เข้าสู่ระบบ';
+        return Promise.reject('invalid');
+      }
+      return fetchSheet(CFG.PERM_ID, CFG.PERM_TAB);
+    })
+    .then(function(pRows){
+      S.perms = {};
+      pRows.forEach(function(r){
+        var cc = String(r[0]||'').trim().toUpperCase();
+        var ps = r.slice(1).map(function(v){ return String(v||'').trim().toUpperCase(); })
+                            .filter(function(v){ return v; });
+        S.perms[cc] = ps;
+      });
+      S.user = u;
+      sessionStorage.setItem('dsd_u', u);
+
+      el('loginScreen').style.display  = 'none';
+      el('dashboard').style.display    = 'flex';
+      el('dashboard').style.flexDirection = 'column';
+      el('userBadge').textContent = u;
+
+      S.date   = new Date();
+      S.mode   = 'day';
+      updateDateDisp();
+      return loadData();
+    })
+    .catch(function(e){
+      if (e === 'invalid') return;
+      showLoginErr('ไม่สามารถเชื่อมต่อ Google Sheet ได้ กรุณาตรวจสอบการตั้งค่า Sharing');
+      console.error(e);
+      bt.disabled = false; bt.textContent = 'เข้าสู่ระบบ';
     });
-  loadUsers.then(function(){
-    var found = S.users.find(function(x){ return x.u === u && x.p === p; });
-    if (!found) {
-      showLoginErr('Invalid Username or Password');
-      bt.disabled = false; bt.textContent = 'Login';
-      return Promise.reject('invalid');
-    }
-    return fetchSheet(CFGPERM_ID, CFG.PERM_TAB);
-  }).then(function(pRows){
-    S.perms = {};
-    pRows.forEach(function(r){
-      var cc = String(r[0]||'').trim().toUpperCase();
-      var ps = r.slice(1).map(function(v){ return String(v||'').trim().toUpperCase(); }).filter(Boolean);
-      S.perms[cc] = ps;
-    });
-    S.user = u;
-    sessionStorage.setItem('dsd_u', u);
-    el('loginScreen').style.display = 'none';
-    el('dashboard').style.display = 'flex';
-    el('dashboard').style.flexDirection = 'column';
-    el('userBadge').textContent = u;
-    S.date = new Date(); S.mode = 'day';
-    updateDateDisp();
-    return loadData();
-  }).catch(function(e){
-    if (e === 'invalid') return;
-    showLoginErr('Cannot connect to Google Sheet. Check Sharing settings.');
-    console.error(e);
-    bt.disabled = false; bt.textContent = 'Login';
-  });
 }
 
-function showLoginErr(msg){ var e = el('loginErr'); e.textContent = msg; e.style.display = 'block'; }
-function doLogout(){
+function showLoginErr(msg) {
+  var e = el('loginErr');
+  e.textContent = msg;
+  e.style.display = 'block';
+}
+
+function doLogout() {
   sessionStorage.removeItem('dsd_u');
-  S.user=null; S.raw=[]; S.loaded=false;
-  el('dashboard').style.display='none';
-  el('loginScreen').style.display='flex';
-  el('inpPass').value=''; el('loginErr').style.display='none';
+  S.user = null; S.raw = []; S.loaded = false;
+  el('dashboard').style.display    = 'none';
+  el('loginScreen').style.display  = 'flex';
+  el('inpPass').value = '';
+  el('loginErr').style.display = 'none';
 }
 
-function loadData(){
+/* ================================================================
+   DATA LOAD
+================================================================ */
+function loadData() {
   showState('load');
   return fetchSheet(CFG.DATA_ID, CFG.DATA_TAB)
     .then(function(rows){
-      var C=CFG.C;
-      S.raw=rows.map(function(r){
-        var d=r[C.DATE]; if(typeof d==='string') d=new Date(d);
-        return{
-          date:(d instanceof Date&&!isNaN(d))?d:null,
-          rep:String(r[C.REP]||'').trim().toUpperCase(),
-          customer:String(r[C.CUSTOMER]||'').trim(),
-          product:String(r[C.PRODUCT]||'').trim(),
-          invoice:String(r[C.INVOICE]||'').trim(),
-          qty:+r[C.QTY]||0,amount:+r[C.AMOUNT]||0,
-          foc:+r[C.FOC]||0,foc2:+r[C.FOC2]||0,borrow:+r[C.BORROW]||0
+      var C = CFG.C;
+      S.raw = rows.map(function(r){
+        var d = r[C.DATE];
+        if (typeof d === 'string') d = new Date(d);
+        return {
+          date:     (d instanceof Date && !isNaN(d)) ? d : null,
+          rep:      String(r[C.REP]||'').trim().toUpperCase(),
+          customer: String(r[C.CUSTOMER]||'').trim(),
+          product:  String(r[C.PRODUCT]||'').trim(),
+          invoice:  String(r[C.INVOICE]||'').trim(),
+          qty:      +r[C.QTY]    || 0,
+          amount:   +r[C.AMOUNT] || 0,
+          foc:      +r[C.FOC]    || 0,
+          foc2:     +r[C.FOC2]   || 0,
+          borrow:   +r[C.BORROW] || 0
         };
-      }).filter(function(r){return r.date!==null;});
-      S.loaded=true;
-      toast('Loaded '+S.raw.length+' records');
+      }).filter(function(r){ return r.date !== null; });
+
+      S.loaded = true;
+      toast('โหลดข้อมูลสำเร็จ ' + S.raw.length + ' รายการ');
       applyFilter();
-    }).catch(function(e){
+    })
+    .catch(function(e){
       console.error(e);
-      showState('empty','<strong>Error</strong> loading data. Check Sheet "'+CFG.DATA_TAB+'" and Sharing settings.');
+      showState('empty', '⚠️ ไม่สามารถโหลดข้อมูลได้<br><small>กรุณาตรวจสอบ Sheet "' + CFG.DATA_TAB + '" และการตั้งค่า Sharing</small>');
     });
 }
-function reloadData(){ S.loaded=false; toast('Reloading...'); loadData(); }
 
-function applyFilter(){
-  if(!S.loaded)return;
-  var perms=S.perms[S.user]||[S.user];
-  var sp=el('sProd').value.trim().toLowerCase();
-  var sc=el('sCust').value.trim().toLowerCase();
-  var d=S.date;
-  S.view=S.raw.filter(function(r){
-    if(perms.length&&!perms.includes(r.rep))return false;
-    if(!r.date)return false;
-    if(S.mode==='day'){
-      if(r.date.getFullYear()!==d.getFullYear()||r.date.getMonth()!==d.getMonth()||r.date.getDate()!==d.getDate())return false;
-    }else{
-      if(r.date.getFullYear()!==d.getFullYear()||r.date.getMonth()!==d.getMonth())return false;
+function reloadData() {
+  S.loaded = false;
+  toast('กำลังโหลดข้อมูลใหม่ …');
+  loadData();
+}
+
+/* ================================================================
+   FILTER & RENDER
+================================================================ */
+function applyFilter() {
+  if (!S.loaded) return;
+
+  var perms = S.perms[S.user] || [S.user];
+  var sp = el('sProd').value.trim().toLowerCase();
+  var sc = el('sCust').value.trim().toLowerCase();
+  var d  = S.date;
+
+  S.view = S.raw.filter(function(r){
+    // Permission
+    if (perms.length && !perms.includes(r.rep)) return false;
+    // Date
+    if (!r.date) return false;
+    if (S.mode === 'day') {
+      if (r.date.getFullYear() !== d.getFullYear() ||
+          r.date.getMonth()    !== d.getMonth()    ||
+          r.date.getDate()     !== d.getDate()) return false;
+    } else {
+      if (r.date.getFullYear() !== d.getFullYear() ||
+          r.date.getMonth()    !== d.getMonth()) return false;
     }
-    if(sp&&!r.product.toLowerCase().includes(sp))return false;
-    if(sc&&!r.customer.toLowerCase().includes(sc))return false;
+    // Search
+    if (sp && !r.product.toLowerCase().includes(sp)) return false;
+    if (sc && !r.customer.toLowerCase().includes(sc)) return false;
     return true;
   });
+
+  // Sort: Date → Invoice → Customer → Product
   S.view.sort(function(a,b){
-    if(a.date-b.date)return a.date-b.date;
-    if(a.invoice<b.invoice)return -1; if(a.invoice>b.invoice)return 1;
-    if(a.customer<b.customer)return -1; if(a.customer>b.customer)return 1;
-    if(a.product<b.product)return -1; if(a.product>b.product)return 1;
+    if (a.date - b.date) return a.date - b.date;
+    if (a.invoice < b.invoice) return -1;
+    if (a.invoice > b.invoice) return  1;
+    if (a.customer < b.customer) return -1;
+    if (a.customer > b.customer) return  1;
+    if (a.product < b.product) return -1;
+    if (a.product > b.product) return  1;
     return 0;
   });
-  renderTable(); renderSummary();
+
+  renderTable();
+  renderSummary();
 }
 
-function clearSearch(){ el('sProd').value=''; el('sCust').value=''; applyFilter(); }
+function clearSearch() {
+  el('sProd').value = '';
+  el('sCust').value = '';
+  applyFilter();
+}
 
-function renderTable(){
-  if(S.view.length===0){showState('empty');return;}
+function renderTable() {
+  if (S.view.length === 0) { showState('empty'); return; }
   showState('table');
-  var html=''; var lastDS=null;
+
+  var html = '';
+  var lastDateStr = null;
+
   S.view.forEach(function(r){
-    var ds=fmtDate(r.date);
-    if(S.mode==='month'&&ds!==lastDS){
-      html+='<tr class="date-grp-row"><td colspan="10">📅 '+esc(ds)+'</td></tr>';
-      lastDS=ds;
+    var ds = fmtDate(r.date);
+    if (S.mode === 'month' && ds !== lastDateStr) {
+      html += '<tr class="date-grp-row"><td colspan="10">📅 ' + esc(ds) + '</td></tr>';
+      lastDateStr = ds;
     }
-    html+='<tr><td>'+esc(ds)+'</td><td>'+esc(r.invoice)+'</td><td class="trunc" title="'+esc(r.rep)+'">'+esc(r.rep)+'</td><td class="trunc" title="'+esc(r.customer)+'">'+esc(r.customer)+'</td><td class="trunc" title="'+esc(r.product)+'">'+esc(r.product)+'</td><td class="r">'+fmtN(r.qty,0)+'</td><td class="r">'+fmtN(r.amount,2)+'</td><td class="r">'+fmtN(r.foc,0)+'</td><td class="r">'+fmtN(r.foc2,0)+'</td><td class="r">'+fmtN(r.borrow,0)+'</td></tr>';
+    html += '<tr>'
+      + '<td>' + esc(ds) + '</td>'
+      + '<td>' + esc(r.invoice) + '</td>'
+      + '<td class="trunc" title="' + esc(r.rep) + '">' + esc(r.rep) + '</td>'
+      + '<td class="trunc" title="' + esc(r.customer) + '">' + esc(r.customer) + '</td>'
+      + '<td class="trunc" title="' + esc(r.product) + '">' + esc(r.product) + '</td>'
+      + '<td class="r">' + fmtN(r.qty,   0) + '</td>'
+      + '<td class="r">' + fmtN(r.amount, 2) + '</td>'
+      + '<td class="r">' + fmtN(r.foc,   0) + '</td>'
+      + '<td class="r">' + fmtN(r.foc2,  0) + '</td>'
+      + '<td class="r">' + fmtN(r.borrow,0) + '</td>'
+      + '</tr>';
   });
-  el('tBody').innerHTML=html;
-  var T=S.view.reduce(function(a,r){ a.qty+=r.qty; a.amount+=r.amount; a.foc+=r.foc; a.foc2+=r.foc2; a.borrow+=r.borrow; return a; },{qty:0,amount:0,foc:0,foc2:0,borrow:0});
-  el('tFoot').innerHTML='<tr><td colspan="5">Total ('+S.view.length+' records)</td><td class="r">'+fmtN(T.qty,0)+'</td><td class="r">'+fmtN(T.amount,2)+'</td><td class="r">'+fmtN(T.foc,0)+'</td><td class="r">'+fmtN(T.foc2,0)+'</td><td class="r">'+fmtN(T.borrow,0)+'</td></tr>';
+  el('tBody').innerHTML = html;
+
+  // Footer totals
+  var T = S.view.reduce(function(a,r){
+    a.qty+=r.qty; a.amount+=r.amount;
+    a.foc+=r.foc; a.foc2+=r.foc2; a.borrow+=r.borrow;
+    return a;
+  }, {qty:0,amount:0,foc:0,foc2:0,borrow:0});
+
+  el('tFoot').innerHTML = '<tr>'
+    + '<td colspan="5">รวมทั้งหมด (' + S.view.length + ' รายการ)</td>'
+    + '<td class="r">' + fmtN(T.qty,   0) + '</td>'
+    + '<td class="r">' + fmtN(T.amount, 2) + '</td>'
+    + '<td class="r">' + fmtN(T.foc,   0) + '</td>'
+    + '<td class="r">' + fmtN(T.foc2,  0) + '</td>'
+    + '<td class="r">' + fmtN(T.borrow,0) + '</td>'
+    + '</tr>';
 }
 
-function renderSummary(){
-  var T=S.view.reduce(function(a,r){ a.qty+=r.qty; a.amount+=r.amount; a.foc+=r.foc; a.foc2+=r.foc2; a.borrow+=r.borrow; return a; },{qty:0,amount:0,foc:0,foc2:0,borrow:0});
-  el('chQty').textContent='Qty: '+fmtN(T.qty,0);
-  el('chAmt').textContent='Amount: '+fmtN(T.amount,2);
-  el('chFoc').textContent='F.O.C: '+fmtN(T.foc,0);
-  el('chFoc2').textContent='F.O.C2: '+fmtN(T.foc2,0);
-  el('chBorr').textContent='Borrow: '+fmtN(T.borrow,0);
-  el('recCount').textContent=S.view.length+' records';
+function renderSummary() {
+  var v = S.view;
+  var T = v.reduce(function(a,r){
+    a.qty+=r.qty; a.amount+=r.amount;
+    a.foc+=r.foc; a.foc2+=r.foc2; a.borrow+=r.borrow;
+    return a;
+  }, {qty:0,amount:0,foc:0,foc2:0,borrow:0});
+  el('chQty').textContent   = 'Qty: '     + fmtN(T.qty,   0);
+  el('chAmt').textContent   = 'Amount: '  + fmtN(T.amount, 2);
+  el('chFoc').textContent   = 'F.O.C: '   + fmtN(T.foc,   0);
+  el('chFoc2').textContent  = 'F.O.C2: '  + fmtN(T.foc2,  0);
+  el('chBorr').textContent  = 'Borrow: '  + fmtN(T.borrow,0);
+  el('recCount').textContent = v.length + ' รายการ';
 }
 
-function setMode(m){
-  S.mode=m;
-  el('btnDay').classList.toggle('active',m==='day');
-  el('btnMonth').classList.toggle('active',m==='month');
-  updateDateDisp(); applyFilter();
-}
-function nav(delta){
-  var d=S.date;
-  S.date=S.mode==='day'
-    ?new Date(d.getFullYear(),d.getMonth(),d.getDate()+delta)
-    :new Date(d.getFullYear(),d.getMonth()+delta,1);
-  updateDateDisp(); applyFilter();
-}
-function goToday(){ S.date=new Date(); updateDateDisp(); applyFilter(); }
-
-function updateDateDisp(){
-  var d=S.date;
-  var MO=['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
-  var txt=S.mode==='day'
-    ?pad(d.getDate())+' '+MO[d.getMonth()]+' '+(d.getFullYear()+543)
-    :MO[d.getMonth()]+' '+(d.getFullYear()+543);
-  el('dateDisp').textContent=txt;
+/* ================================================================
+   DATE NAVIGATION
+================================================================ */
+function setMode(m) {
+  S.mode = m;
+  el('btnDay')  .classList.toggle('active', m === 'day');
+  el('btnMonth').classList.toggle('active', m === 'month');
+  updateDateDisp();
+  applyFilter();
 }
 
-function showState(s,msg){
-  el('stateLoad').style.display=s==='load'?'block':'none';
-  el('stateEmpty').style.display=s==='empty'?'block':'none';
-  el('tableWrap').style.display=s==='table'?'block':'none';
-  if(s==='empty'&&msg)el('emptyMsg').innerHTML=msg;
-  else if(s==='empty')el('emptyMsg').textContent='No data in this period';
+function nav(delta) {
+  var d = S.date;
+  if (S.mode === 'day')
+    S.date = new Date(d.getFullYear(), d.getMonth(), d.getDate() + delta);
+  else
+    S.date = new Date(d.getFullYear(), d.getMonth() + delta, 1);
+  updateDateDisp();
+  applyFilter();
 }
 
-function fmtDate(d){ if(!d)return ''; return pad(d.getDate())+'/'+pad(d.getMonth()+1)+'/'+(d.getFullYear()+543); }
-function fmtN(n,dec){ if(n===0)return dec===0?'0':'0.00'; return Number(n).toLocaleString('th-TH',{minimumFractionDigits:dec,maximumFractionDigits:dec}); }
-function pad(n){ return n<10?'0'+n:''+n; }
+function goToday() {
+  S.date = new Date();
+  updateDateDisp();
+  applyFilter();
+}
+
+function updateDateDisp() {
+  var d = S.date;
+  var MO = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.',
+            'ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+  var txt = S.mode === 'day'
+    ? pad(d.getDate()) + ' ' + MO[d.getMonth()] + ' ' + (d.getFullYear()+543)
+    : MO[d.getMonth()] + ' ' + (d.getFullYear()+543);
+  el('dateDisp').textContent = txt;
+}
+
+/* ================================================================
+   UI HELPERS
+================================================================ */
+function showState(s, msg) {
+  el('stateLoad') .style.display = s === 'load'  ? 'block' : 'none';
+  el('stateEmpty').style.display = s === 'empty' ? 'block' : 'none';
+  el('tableWrap') .style.display = s === 'table' ? 'block' : 'none';
+  if (s === 'empty' && msg) el('emptyMsg').innerHTML = msg;
+  else if (s === 'empty')  el('emptyMsg').textContent = 'ไม่พบข้อมูลในช่วงเวลาที่เลือก';
+}
+
+var MO_TH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.',
+             'ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+function fmtDate(d) {
+  if (!d) return '';
+  return pad(d.getDate()) + '/' + pad(d.getMonth()+1) + '/' + (d.getFullYear()+543);
+}
+function fmtN(n, dec) {
+  if (n === 0) return dec === 0 ? '0' : '0.00';
+  return Number(n).toLocaleString('th-TH',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+}
+function pad(n){ return n < 10 ? '0'+n : ''+n; }
 function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 function el(id){ return document.getElementById(id); }
+
 var _toastTimer;
-function toast(msg){ var t=el('toast'); t.textContent=msg; t.classList.add('show'); clearTimeout(_toastTimer); _toastTimer=setTimeout(function(){ t.classList.remove('show'); },3000); }
-(function(){ updateDateDisp(); el('inpUser').focus(); })();
+function toast(msg) {
+  var t = el('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 3000);
+}
+
+/* ================================================================
+   INIT
+================================================================ */
+(function(){
+  updateDateDisp();
+  // Enter key on login
+  el('inpUser').focus();
+})();
 </script>
 </body>
 </html>
