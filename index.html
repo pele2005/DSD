@@ -345,9 +345,6 @@ body {
   min-width: 720px;
 }
 .data-table thead th {
-  position: sticky;
-  top: 0;
-  z-index: 10;
   background: var(--pri);
   color: #fff;
   padding: 10px 11px;
@@ -767,22 +764,21 @@ function loadData() {
 
       S.loaded = true;
 
-      // Auto-navigate to latest date that has data for this user
-      // (avoids showing empty when today has no data yet)
-      var perms = S.perms[S.user] || [S.user];
-      var todayStr = [new Date().getFullYear(), new Date().getMonth(), new Date().getDate()].join('-');
-      var hasToday = S.raw.some(function(r){
-        if (perms.length && !perms.includes(r.rep)) return false;
-        return r.date && [r.date.getFullYear(), r.date.getMonth(), r.date.getDate()].join('-') === todayStr;
+      // Auto-navigate: ถ้าวันนี้ไม่มีข้อมูลสำหรับ Rep นี้ ให้เลื่อนไปวันล่าสุดที่มีข้อมูล
+      var _perms = S.perms[S.user] || [S.user];
+      var _now = new Date();
+      var _todayKey = _now.getFullYear() + '-' + _now.getMonth() + '-' + _now.getDate();
+      var _hasToday = S.raw.some(function(r){
+        if (_perms.length && !_perms.includes(r.rep)) return false;
+        return r.date && (r.date.getFullYear()+'-'+r.date.getMonth()+'-'+r.date.getDate()) === _todayKey;
       });
-      if (!hasToday) {
-        var myDates = S.raw
-          .filter(function(r){ return !perms.length || perms.includes(r.rep); })
-          .map(function(r){ return r.date; })
-          .filter(Boolean)
+      if (!_hasToday) {
+        var _dates = S.raw
+          .filter(function(r){ return !_perms.length || _perms.includes(r.rep); })
+          .map(function(r){ return r.date; }).filter(Boolean)
           .sort(function(a,b){ return b - a; });
-        if (myDates.length > 0) {
-          S.date = new Date(myDates[0].getFullYear(), myDates[0].getMonth(), myDates[0].getDate());
+        if (_dates.length > 0) {
+          S.date = new Date(_dates[0].getFullYear(), _dates[0].getMonth(), _dates[0].getDate());
           updateDateDisp();
         }
       }
@@ -856,10 +852,10 @@ function clearSearch() {
 
 function renderTable() {
   if (S.view.length === 0) {
-    var hint = S.mode === 'day'
+    var _hint = S.mode === 'day'
       ? 'ไม่พบข้อมูลในวันที่เลือก<br><small>ลองกดปุ่ม <b>เดือน</b> เพื่อดูข้อมูลทั้งเดือน หรือกดลูกศร ◀ ▶ เพื่อเลื่อนวัน</small>'
       : 'ไม่พบข้อมูลในเดือนที่เลือก';
-    showState('empty', hint);
+    showState('empty', _hint);
     return;
   }
   showState('table');
@@ -962,4 +958,43 @@ function updateDateDisp() {
 ================================================================ */
 function showState(s, msg) {
   el('stateLoad') .style.display = s === 'load'  ? 'block' : 'none';
-  el('stateEmpty'
+  el('stateEmpty').style.display = s === 'empty' ? 'block' : 'none';
+  el('tableWrap') .style.display = s === 'table' ? 'block' : 'none';
+  if (s === 'empty' && msg) el('emptyMsg').innerHTML = msg;
+  else if (s === 'empty')  el('emptyMsg').textContent = 'ไม่พบข้อมูลในช่วงเวลาที่เลือก';
+}
+
+var MO_TH = ['ม.ค.','ก.พ.','มี.ค.','เม.ย.','พ.ค.','มิ.ย.',
+             'ก.ค.','ส.ค.','ก.ย.','ต.ค.','พ.ย.','ธ.ค.'];
+function fmtDate(d) {
+  if (!d) return '';
+  return pad(d.getDate()) + '/' + pad(d.getMonth()+1) + '/' + (d.getFullYear()+543);
+}
+function fmtN(n, dec) {
+  if (n === 0) return dec === 0 ? '0' : '0.00';
+  return Number(n).toLocaleString('th-TH',{minimumFractionDigits:dec,maximumFractionDigits:dec});
+}
+function pad(n){ return n < 10 ? '0'+n : ''+n; }
+function esc(s){ return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function el(id){ return document.getElementById(id); }
+
+var _toastTimer;
+function toast(msg) {
+  var t = el('toast');
+  t.textContent = msg;
+  t.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(function(){ t.classList.remove('show'); }, 3000);
+}
+
+/* ================================================================
+   INIT
+================================================================ */
+(function(){
+  updateDateDisp();
+  // Enter key on login
+  el('inpUser').focus();
+})();
+</script>
+</body>
+</html>
