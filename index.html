@@ -331,7 +331,12 @@ body {
 
 /* Table */
 .table-section { flex: 1; }
-.table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.table-wrap {
+  overflow-x: auto;
+  overflow-y: auto;
+  max-height: calc(100vh - 260px);
+  -webkit-overflow-scrolling: touch;
+}
 .data-table {
   width: 100%;
   border-collapse: collapse;
@@ -340,6 +345,9 @@ body {
   min-width: 720px;
 }
 .data-table thead th {
+  position: sticky;
+  top: 0;
+  z-index: 10;
   background: var(--pri);
   color: #fff;
   padding: 10px 11px;
@@ -959,11 +967,4 @@ function toast(msg) {
 /* ================================================================
    INIT
 ================================================================ */
-(function(){
-  updateDateDisp();
-  // Enter key on login
-  el('inpUser').focus();
-})();
-</script>
-</body>
-</html>
+(function(
